@@ -40,6 +40,7 @@ static CFMachPortRef _eventTap;
 static Boolean _coolEventTapIsEnabled; /// CGEventTapIsEnabled() is pretty slow, so we're using this instead
 
 static dispatch_queue_t _queue;
+static dispatch_source_t _failsafeTimer;
 
 static CFTimeInterval _lastEventTimestamp;
 static int64_t _lastEventDelta;
@@ -122,6 +123,31 @@ static int64_t _lastEventDelta;
         /// Enable eventTap
         CGEventTapEnable(_eventTap, true);
         _coolEventTapIsEnabled = true;
+        
+        /// Start failsafe timer
+        ///     If unfreeze is not called within 5 seconds, force unfreeze to prevent the user from getting stuck with a frozen pointer
+        if (_failsafeTimer) {
+            dispatch_source_cancel(_failsafeTimer);
+        }
+        _failsafeTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _queue);
+        dispatch_source_set_timer(_failsafeTimer, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), DISPATCH_TIME_FOREVER, 0);
+        dispatch_source_set_event_handler(_failsafeTimer, ^{
+            if (_coolEventTapIsEnabled) {
+                DDLogWarn("PointerFreeze - Failsafe timer fired! Force unfreezing pointer. This should not happen under normal circumstances.");
+                CGEventTapEnable(_eventTap, false);
+                _coolEventTapIsEnabled = false;
+                setSuppressionInterval(kMFEventSuppressionIntervalDefault);
+                if (_keepPointerMoving) {
+                    [ModificationUtility hideMousePointer:NO];
+                    [PointerFreeze drawPuppetCursor:NO fresh:NO];
+                }
+            }
+            if (_failsafeTimer) {
+                dispatch_source_cancel(_failsafeTimer);
+                _failsafeTimer = nil;
+            }
+        });
+        dispatch_resume(_failsafeTimer);
         
         if (keepPointerMoving) {
             
@@ -221,6 +247,12 @@ CGEventRef _Nullable mouseMovedCallback(CGEventTapProxy proxy, CGEventType type,
     ///     Not sure whether to use sync or async here
     
     dispatch_async(_queue, ^{
+        
+        /// Cancel failsafe timer
+        if (_failsafeTimer) {
+            dispatch_source_cancel(_failsafeTimer);
+            _failsafeTimer = nil;
+        }
         
         /// Process timestamp
         BOOL pointerIsMoving = (timeSinceLastEvent < GeneralConfig.mouseMovingMaxIntervalSmall) && _lastEventDelta > 0;
